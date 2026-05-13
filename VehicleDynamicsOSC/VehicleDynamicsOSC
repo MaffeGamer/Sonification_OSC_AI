@@ -1,0 +1,392 @@
+/**
+ * Vehicle Dynamics OSC Controller
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Three output modes (cycle with the MODE button):
+ *
+ *   0  OSC/UDP   → sends to 127.0.0.1:9001  (use [udpreceive 9001]→[oscparse] in Plug Data)
+ *   1  Serial    → USB serial at SERIAL_BAUD (skips Bluetooth on Mac automatically)
+ *   2  Console   → println() to the Processing monitor  ← easiest for debugging
+ *
+ * OSC addresses / CSV columns:
+ *   /vehicle/speed        float  0–200 km/h
+ *   /vehicle/throttle     float  0.0–1.0
+ *   /vehicle/speeding     int    0 or 1
+ *   /vehicle/pedestrians  int    0 or 1
+ *
+ * MAC SERIAL NOTE:
+ *   Run once in Console mode first. Then open a second Processing sketch with:
+ *     import processing.serial.*;
+ *     Serial port;
+ *     void setup() { println(Serial.list()); }
+ *   Note the [index] of your /dev/cu.usbserial* or /dev/cu.usbmodem* port,
+ *   then set SERIAL_PORT_INDEX below and switch to Serial mode.
+ *   Bluetooth shows as /dev/cu.Bluetooth-* and is skipped automatically.
+ *
+ * Libraries needed (Sketch → Import Library → Manage Libraries):
+ *   oscP5 by Andreas Schlegel
+ */
+
+import oscP5.*;
+import netP5.*;
+import processing.serial.*;
+
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+final int    OSC_PORT          = 9001;
+final String OSC_HOST          = "127.0.0.1";
+final int    SERIAL_BAUD       = 115200;
+final int    SEND_HZ           = 20;
+
+// Set to -1 to auto-detect the first real USB serial port (skips Bluetooth).
+// If auto-detect picks the wrong one, set this to the [index] printed in console.
+final int    SERIAL_PORT_INDEX = -1;
+
+// ─── STATE ────────────────────────────────────────────────────────────────────
+// outputMode:  0=OSC  1=Serial  2=Console
+int     outputMode     = 0;
+int     lastSend       = 0;
+String  serialPortName = "none";
+
+OscP5      osc;
+NetAddress oscDest;
+Serial     port;
+
+// ─── CONTROLS ─────────────────────────────────────────────────────────────────
+Slider     slSpeed, slThrottle;
+Toggle     togSpeeding, togPeds;
+ModeButton btnMode;
+
+// ─── PALETTE ──────────────────────────────────────────────────────────────────
+color BG     = color(14, 14, 18);
+color PANEL  = color(22, 22, 30);
+color BORDER = color(44, 44, 60);
+color ACCENT = color(0, 200, 120);
+color WARN   = color(230, 80, 60);
+color TEAL   = color(0, 180, 200);
+color AMBER  = color(230, 160, 30);
+color TEXT   = color(220, 220, 230);
+color MUTED  = color(120, 120, 140);
+
+// ─── SETUP ────────────────────────────────────────────────────────────────────
+void setup() {
+  size(680, 540);
+  smooth(4);
+
+  osc     = new OscP5(this, 12000);
+  oscDest = new NetAddress(OSC_HOST, OSC_PORT);
+
+  slSpeed     = new Slider(60, 160, 560, 40, 0, 200, 0,  "VEHICLE SPEED", "km/h");
+  slThrottle  = new Slider(60, 300, 560, 40, 0, 100, 0,  "THROTTLE",      "%");
+  togSpeeding = new Toggle(60,  410, 260, 56, "SPEEDING",    false, WARN);
+  togPeds     = new Toggle(360, 410, 260, 56, "PEDESTRIANS", false, TEAL);
+  btnMode     = new ModeButton(60, 478, 560, 38);
+
+  printPortList();
+}
+
+// ─── DRAW ─────────────────────────────────────────────────────────────────────
+void draw() {
+  background(BG);
+  drawGrid();
+  drawHeader();
+
+  slSpeed.draw();
+  slThrottle.draw();
+  togSpeeding.draw();
+  togPeds.draw();
+  btnMode.draw();
+
+  drawStatusBar();
+
+  if (millis() - lastSend > (1000 / SEND_HZ)) {
+    sendValues();
+    lastSend = millis();
+  }
+}
+
+// ─── SEND ─────────────────────────────────────────────────────────────────────
+void sendValues() {
+  float spd = slSpeed.value;
+  float thr = slThrottle.value / 100.0;
+  int   spg = togSpeeding.state ? 1 : 0;
+  int   ped = togPeds.state     ? 1 : 0;
+
+  if (outputMode == 0) {
+    sendOSC("/vehicle/speed",       spd);
+    sendOSC("/vehicle/throttle",    thr);
+    sendOSC("/vehicle/speeding",    spg);
+    sendOSC("/vehicle/pedestrians", ped);
+
+  } else if (outputMode == 1 && port != null) {
+    port.write(nf(spd,0,1) + "," + nf(thr,0,3) + "," + spg + "," + ped + "\n");
+
+  } else if (outputMode == 2) {
+    println("speed=" + nf(spd,0,1) + "  throttle=" + nf(thr,0,3)
+          + "  speeding=" + spg + "  peds=" + ped);
+  }
+}
+
+void sendOSC(String addr, float val) {
+  OscMessage msg = new OscMessage(addr);
+  msg.add(val);
+  osc.send(msg, oscDest);
+}
+
+void sendOSC(String addr, int val) {
+  OscMessage msg = new OscMessage(addr);
+  msg.add(val);
+  osc.send(msg, oscDest);
+}
+
+// ─── SERIAL ───────────────────────────────────────────────────────────────────
+void printPortList() {
+  String[] all = Serial.list();
+  println("\n─── Serial ports on this machine ─────────────────────────");
+  for (int i = 0; i < all.length; i++) {
+    String lo  = all[i].toLowerCase();
+    String tag = lo.contains("bluetooth") || lo.contains("bt-") ? "  ← BLUETOOTH (skip)"
+               : lo.contains("usbserial") || lo.contains("usbmodem") ? "  ← USB serial"
+               : "";
+    println("  [" + i + "]  " + all[i] + tag);
+  }
+  if (all.length == 0) println("  (none found)");
+  println("───────────────────────────────────────────────────────────");
+  println("Tip: set SERIAL_PORT_INDEX to the [index] of your USB device.");
+  println("Default mode is OSC/UDP. Use Console mode for quick monitoring.\n");
+}
+
+void openSerial() {
+  String[] all = Serial.list();
+  String chosen = null;
+
+  if (SERIAL_PORT_INDEX >= 0 && SERIAL_PORT_INDEX < all.length) {
+    chosen = all[SERIAL_PORT_INDEX];
+    println("Using configured index " + SERIAL_PORT_INDEX + ": " + chosen);
+  } else {
+    for (String p : all) {
+      String lo = p.toLowerCase();
+      if (lo.contains("bluetooth") || lo.contains("bt-")) {
+        println("Skipping Bluetooth: " + p);
+        continue;
+      }
+      if (lo.contains("usbserial") || lo.contains("usbmodem") || lo.startsWith("com")) {
+        chosen = p;
+        println("Auto-selected: " + chosen);
+        break;
+      }
+    }
+  }
+
+  if (chosen == null) {
+    println("No USB serial port found → switching to CONSOLE mode.");
+    println("Set SERIAL_PORT_INDEX to force a specific port.");
+    outputMode = 2;
+    return;
+  }
+
+  try {
+    port = new Serial(this, chosen, SERIAL_BAUD);
+    serialPortName = chosen;
+    println("Serial open: " + chosen + " @ " + SERIAL_BAUD + " baud");
+  } catch (Exception e) {
+    println("Serial failed: " + e.getMessage() + " → switching to CONSOLE mode.");
+    outputMode = 2;
+  }
+}
+
+// ─── INPUT ────────────────────────────────────────────────────────────────────
+void mousePressed() {
+  slSpeed.onPress();
+  slThrottle.onPress();
+  togSpeeding.onPress();
+  togPeds.onPress();
+  btnMode.onPress();
+}
+void mouseDragged()  { slSpeed.onDrag();    slThrottle.onDrag();    }
+void mouseReleased() { slSpeed.onRelease(); slThrottle.onRelease(); }
+
+// ─── VISUALS ──────────────────────────────────────────────────────────────────
+void drawHeader() {
+  fill(TEXT); noStroke();
+  textFont(createFont("Courier New Bold", 11));
+  textAlign(LEFT, TOP);
+  text("VEHICLE DYNAMICS CONTROLLER", 60, 28);
+
+  fill(MUTED);
+  textFont(createFont("Courier New", 9));
+  String modeStr = outputMode == 0 ? "OSC/UDP → " + OSC_HOST + ":" + OSC_PORT
+                 : outputMode == 1 ? "Serial → " + serialPortName
+                 :                   "Console (Processing monitor)";
+  text(modeStr + "  |  " + SEND_HZ + " Hz", 60, 46);
+
+  drawSpeedArc(600, 78, 48, slSpeed.value / 200.0);
+}
+
+void drawSpeedArc(float cx, float cy, float r, float t) {
+  noFill(); strokeWeight(3);
+  stroke(BORDER);
+  arc(cx, cy, r*2, r*2, PI, TWO_PI);
+
+  color col = t < 0.65 ? ACCENT : (t < 0.85 ? AMBER : WARN);
+  stroke(col);
+  arc(cx, cy, r*2, r*2, PI, PI + t * PI);
+
+  float ang = PI + t * PI;
+  stroke(col); strokeWeight(1.5);
+  line(cx, cy, cx + cos(ang)*(r-7), cy + sin(ang)*(r-7));
+
+  noStroke();
+  fill(TEXT);
+  textFont(createFont("Courier New Bold", 14));
+  textAlign(CENTER, CENTER);
+  text(nf(slSpeed.value, 0, 0), cx, cy + 10);
+  fill(MUTED);
+  textFont(createFont("Courier New", 8));
+  text("km/h", cx, cy + 24);
+}
+
+void drawGrid() {
+  stroke(BORDER); strokeWeight(0.4);
+  for (int x=0; x<width; x+=40)  line(x, 0, x, height);
+  for (int y=0; y<height; y+=40) line(0, y, width, y);
+}
+
+void drawStatusBar() {
+  fill(PANEL); noStroke();
+  rect(0, height-24, width, 24);
+
+  fill(MUTED);
+  textFont(createFont("Courier New", 9));
+  textAlign(LEFT, CENTER);
+  float thr = slThrottle.value / 100.0;
+  text("LAST → speed:" + nf(slSpeed.value,0,1)
+     + "  throttle:" + nf(thr,0,3)
+     + "  speeding:" + (togSpeeding.state?1:0)
+     + "  peds:" + (togPeds.state?1:0),
+     12, height-12);
+
+  color modeCol   = outputMode==0 ? TEAL : (outputMode==1 ? AMBER : ACCENT);
+  String modeText = outputMode==0 ? "● OSC/UDP" : (outputMode==1 ? "● SERIAL" : "● CONSOLE");
+  fill(modeCol);
+  textAlign(RIGHT, CENTER);
+  text(modeText, width-12, height-12);
+}
+
+// ─── SLIDER CLASS ─────────────────────────────────────────────────────────────
+class Slider {
+  float x, y, w, h, minVal, maxVal, value;
+  String label, unit;
+  boolean dragging = false;
+
+  Slider(float x, float y, float w, float h, float mn, float mx, float v, String lbl, String u) {
+    this.x=x; this.y=y; this.w=w; this.h=h;
+    minVal=mn; maxVal=mx; value=v; label=lbl; unit=u;
+  }
+
+  void draw() {
+    fill(PANEL); stroke(BORDER); strokeWeight(0.8);
+    rect(x-10, y-36, w+20, h+54, 6);
+
+    fill(MUTED); noStroke();
+    textFont(createFont("Courier New", 9));
+    textAlign(LEFT, TOP);
+    text(label, x, y-30);
+
+    boolean warn = label.equals("VEHICLE SPEED") && value > 130;
+    color col = warn ? WARN : ACCENT;
+    fill(col);
+    textFont(createFont("Courier New Bold", 18));
+    textAlign(RIGHT, TOP);
+    text(nf(value, 0, 0) + " " + unit, x+w, y-32);
+
+    float pct = (value - minVal) / (maxVal - minVal);
+    noStroke(); fill(BORDER);
+    rect(x, y+h/2-3, w, 6, 3);
+    fill(col);
+    rect(x, y+h/2-3, w*pct, 6, 3);
+
+    stroke(TEXT); strokeWeight(1.5);
+    fill(dragging ? col : PANEL);
+    ellipse(x + w*pct, y+h/2, 18, 18);
+
+    stroke(BORDER); strokeWeight(0.5);
+    for (int i=0; i<=10; i++) {
+      float tx = x + w*(i/10.0);
+      line(tx, y+h/2+10, tx, y+h/2+16);
+    }
+    fill(MUTED); noStroke();
+    textFont(createFont("Courier New", 8));
+    textAlign(LEFT, TOP);  text(nf(minVal,0,0), x,   y+h/2+18);
+    textAlign(RIGHT, TOP); text(nf(maxVal,0,0), x+w, y+h/2+18);
+  }
+
+  boolean over() { return mouseX>x-10&&mouseX<x+w+10&&mouseY>y-36&&mouseY<y+h+20; }
+  void onPress()   { if (over()) { dragging=true; update(); } }
+  void onDrag()    { if (dragging) update(); }
+  void onRelease() { dragging=false; }
+  void update()    { value = minVal + constrain((mouseX-x)/w,0,1)*(maxVal-minVal); }
+}
+
+// ─── TOGGLE CLASS ─────────────────────────────────────────────────────────────
+class Toggle {
+  float x, y, w, h;
+  String label;
+  boolean state;
+  color onColor;
+
+  Toggle(float x, float y, float w, float h, String lbl, boolean init, color c) {
+    this.x=x; this.y=y; this.w=w; this.h=h; label=lbl; state=init; onColor=c;
+  }
+
+  void draw() {
+    color border = state ? onColor : BORDER;
+    fill(state ? color(red(onColor),green(onColor),blue(onColor),30) : PANEL);
+    stroke(border); strokeWeight(state ? 1.2 : 0.8);
+    rect(x, y, w, h, 5);
+
+    noStroke(); fill(state ? onColor : BORDER);
+    ellipse(x+20, y+h/2, 8, 8);
+
+    fill(state ? onColor : MUTED);
+    textFont(createFont("Courier New Bold", 11));
+    textAlign(LEFT, CENTER);
+    text(label, x+36, y+h/2-7);
+
+    fill(state ? TEXT : MUTED);
+    textFont(createFont("Courier New", 9));
+    text(state ? "YES" : "NO", x+36, y+h/2+7);
+  }
+
+  boolean over() { return mouseX>x&&mouseX<x+w&&mouseY>y&&mouseY<y+h; }
+  void onPress() { if (over()) state=!state; }
+}
+
+// ─── MODE BUTTON CLASS ────────────────────────────────────────────────────────
+class ModeButton {
+  float x, y, w, h;
+  String[] labels = {
+    "MODE: OSC/UDP → 127.0.0.1:9001   [click → Serial]",
+    "MODE: SERIAL (USB)                [click → Console]",
+    "MODE: CONSOLE (println monitor)   [click → OSC/UDP]"
+  };
+  color[] cols = { TEAL, AMBER, ACCENT };
+
+  ModeButton(float x, float y, float w, float h) { this.x=x; this.y=y; this.w=w; this.h=h; }
+
+  void draw() {
+    color c = cols[outputMode];
+    fill(PANEL); stroke(c); strokeWeight(0.8);
+    rect(x, y, w, h, 4);
+    fill(c);
+    textFont(createFont("Courier New Bold", 10));
+    textAlign(CENTER, CENTER);
+    text(labels[outputMode], x+w/2, y+h/2);
+  }
+
+  boolean over() { return mouseX>x&&mouseX<x+w&&mouseY>y&&mouseY<y+h; }
+
+  void onPress() {
+    if (!over()) return;
+    outputMode = (outputMode + 1) % 3;
+    if (outputMode == 1 && port == null) openSerial();
+  }
+}
